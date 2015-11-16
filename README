@@ -1,0 +1,133 @@
+#Assignment4 -- Shaowei Su#
+
+1. Files
+
+-- build.xml //no change
+-- WordCount.java
+-- Jacobi.java
+-- Jacobi_m2.java //the method2 of Jacobi, please rename it to Jacobi.java when test it, thanks
+-- README
+-- patterns.txt //to eliminate other characters
+
+-------------------------------------------------------------------------------------------------------------
+
+2. Usage
+
+To run WordCount: ~cs258/hadoop-1.2.1/bin/hadoop jar build/Hadoop.jar org.myorg.WordCount -Dwordcount.case.sensitive=false /input/gutenberg/pg1378.txt /user/ssu9/result -skip /user/ssu9/patterns.txt
+(Note: for the purpose of privacy, I deleted the patterns.txt file from HDFS file systems)
+
+To run Jacobi:  ~cs258/hadoop-1.2.1/bin/hadoop jar build/Hadoop.jar org.myorg.Jacobi /user/ssu9/1024.dat /user/ssu9/output
+
+-------------------------------------------------------------------------------------------------------------
+
+3. WordCount
+
+Most of the codes simply follows the tutorial(https://hadoop.apache.org/docs/r1.2.1/mapred_tutorial.html). But our requirement is slightly different with the tutorial in the way that we only calculate in how many files that one word appears. 
+
+So I changed the combine part, instead of accumulate how many times one word appear. It will simply output 1: 
+
+/* JAVA
+
+	public static class newCombiner extends MapReduceBase implements Reducer<Text, IntWritable, Text, IntWritable> {
+		public void reduce(Text key, Iterator<IntWritable> values, OutputCollector<Text, IntWritable> output, Reporter reporter) throws IOException {
+
+			int sum = 1;
+			output.collect(key, new IntWritable(sum));
+
+		}
+	}
+*/
+
+meanwhile keep the rest parts the same as before. But this implementation has one bug: there are 40 a's(supposed to be at most 37) and I cannot explain why.
+
+-------------------------------------------------------------------------------------------------------------
+
+4. Jacobi -- method 1
+
+4.1 Basic idea
+
+The basic idea of my method is that: for map part, each map task will read in one line of input file, i.e. row index, column index and value. Every map task will concatenate this parts in the way:
+
+/* JAVA
+
+	    	if (Integer.parseInt(colindex) != n) {
+	    		output.collect(new IntWritable(rowindex), new Text("a#"+colindex+"#"+elevalue));
+	    	} else {
+	    		output.collect(new IntWritable(rowindex), new Text("b#"+colindex+"#"+elevalue));
+	    	}
+
+*/
+so that to form key-value pairs like (1, a#1#15), stands for row 1 and column 1 with value 15; also, we can distinguish between matrix a and matrix b according to their column number.
+
+For the reduce part, each reduce task can get one entire row i of matrix a[i][..] and one b[i]. Besides, we can load previous output x[] array from distributed cache. With all these inputs, it is enough to calculate a new x[i]. After convergence check we may increase the counter.
+
+Once one iteration finished, we will check the counter and terminate the loop when it meets requirement.
+
+4.2 Use of distributed cache
+
+In order to transfer the array x from previous iteration, the program will read previous output as part of the distributed cache.
+
+/* JAVA
+		    if (iter != 0) {
+		    	Path xOut = new Path(args[1]+"/"+Integer.toString(iter-1)+"/part-00000");
+		    	DistributedCache.addCacheFile(xOut.toUri(), conf);
+		    }
+*/
+
+4.3 Performance
+
+The correctness of this method has been tested with all the input files. And it presented a satisfatory result with these tests except for the input 1048576.dat. The reducer part will take very long time to finish. So I tried to relieve the pressure of reduce by transferring the computation part to mapper and combiner and came to the method 2.  
+-------------------------------------------------------------------------------------------------------------
+
+5. Jacobi -- method 2
+
+4.1 Basic idea
+
+The basic idea of my method is that: for map part, each map task will read in one line of input file, i.e. row index, column index and value. Every map task will concatenate this parts in the way:
+
+/* JAVA
+
+	    	if (colindex != n) {
+	    		if(colindex == rowindex) {
+	    			output.collect(new IntWritable(rowindex), new Text("c#"+Integer.toString(colindex)+"#"+elevalue));
+	    			//System.out.println("c# "+Integer.toString(colindex)+" # "+elevalue);
+	    		} else {
+	    			output.collect(new IntWritable(rowindex), new Text("a#"+Integer.toString(colindex)+"#"+String.valueOf(outvalue)));
+	    			//System.out.println("a# "+Integer.toString(colindex)+" # "+String.valueOf(outvalue));
+	    		}
+	    	} else {
+	    		output.collect(new IntWritable(rowindex), new Text("b#"+Integer.toString(colindex)+"#"+elevalue));
+	    		//System.out.println("b# "+Integer.toString(colindex)+" # "+elevalue);
+	    	}
+
+*/
+But the "a#" matrix in this method will contain the result of a[row][col]*P[col], which will be combined later into sum value to calculate new X[]; also, "c#" will store the data on the diagonal; "b#" is similar to the previous method that contains the B[] value.
+
+
+For the reduce part, the computation part will be simplified to: double x_new = (ValB - ValA) / ValC;
+
+Once one iteration finished, we will check the counter and terminate the loop when it meets requirement.
+
+4.2 Performance 
+
+Surprisingly, though correctly process other input files(4.dat, 16.dat, ...), this method does not present any improvment in the performance with 1048576.dat. And I cannot figure it out how to speedup this calculation.
+
+-------------------------------------------------------------------------------------------------------------
+
+5. Tests
+
+5.1 WordCount (webster1) : Total execution time is: 40.638 s.
+
+5.2 Jacobi(method 1) (with eps = 1e-10 and x[] initialize to 0):
+-4.dat: 1117.157 s (68 iterations), 16.42s per iteration
+-16.dat: 436.703 s (27 iterations), 16.17s per iteration
+-256.dat 255.246 s (16 iterations), 15.9s per iteration  
+-1024.dat 418.625 s (15 iterations), 27.86s per iteration
+
+-------------------------------------------------------------------------------------------------------------
+
+6. References
+
+http://blog.csdn.net/xx_123_1_rj/article/details/44753677
+
+
